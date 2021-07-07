@@ -7,6 +7,12 @@ import GQLResultInterface, { GQLEdgeInterface, GQLTransactionsResultInterface } 
 
 import SmartWeaveError, { SmartWeaveErrorType } from './errors';
 
+const cache: {
+  [contract: string]: {
+    [height: number]: string;
+  };
+} = {};
+
 /**
  * Queries all interaction transactions and replays a contract to its latest state.
  *
@@ -26,6 +32,14 @@ export async function readContract(
   if (!height) {
     const networkInfo = await arweave.network.getInfo();
     height = networkInfo.height;
+  }
+
+  if (contractId in cache) {
+    if (height in cache[contractId]) {
+      const res = JSON.parse(cache[contractId][height]);
+
+      return returnValidity ? { state: res.state, validity: res.validity } : res.state;
+    }
   }
 
   const loadPromise = loadContract(arweave, contractId).catch((err) => {
@@ -58,7 +72,22 @@ export async function readContract(
   // tslint:disable-next-line: prefer-const
   let { handler, swGlobal } = contractInfo;
 
-  const validity: Record<string, boolean> = {};
+  let validity: Record<string, boolean> = {};
+
+  if (contractId in cache) {
+    const heights = Object.keys(cache[contractId])
+      .filter((item) => +item < height)
+      .map((item) => +item);
+
+    if (heights.length) {
+      const max = Math.max(...heights);
+
+      txInfos = txInfos.filter((item: { node: InteractionTx }) => item.node.block.height > max);
+      const res = JSON.parse(cache[contractId][max]);
+      state = res.state;
+      validity = res.validity;
+    }
+  }
 
   for (const txInfo of txInfos) {
     const currentTx: InteractionTx = txInfo.node;
@@ -107,7 +136,10 @@ export async function readContract(
 
     state = result.state;
 
-    const settings = state.settings ? new Map(state.settings) : new Map();
+    let settings = new Map();
+    try {
+      if (state.settings) settings = new Map(state.settings);
+    } catch {}
 
     const evolve: string = state.evolve || settings.get('evolve');
 
@@ -134,6 +166,10 @@ export async function readContract(
     }
   }
 
+  cache[contractId] = {
+    ...(cache[contractId] || {}),
+    [height]: JSON.stringify({ state, validity }),
+  };
   return returnValidity ? { state, validity } : state;
 }
 
